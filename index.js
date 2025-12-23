@@ -1,620 +1,330 @@
-const express = require("express");
-const app = express();
-const axios = require("axios");
-const os = require('os');
-const fs = require("fs");
-const path = require("path");
-const { promisify } = require('util');
-const exec = promisify(require('child_process').exec);
-const { execSync } = require('child_process');        // 只填写UPLOAD_URL将上传节点,同时填写UPLOAD_URL和PROJECT_URL将上传订阅
-const UPLOAD_URL = process.env.UPLOAD_URL || '';      // 节点或订阅自动上传地址,需填写部署Merge-sub项目后的首页地址,例如：https://merge.xxx.com
-const PROJECT_URL = process.env.PROJECT_URL || '';    // 需要上传订阅或保活时需填写项目分配的url,例如：https://google.com
-const AUTO_ACCESS = process.env.AUTO_ACCESS || false; // false关闭自动保活，true开启,需同时填写PROJECT_URL变量
-const FILE_PATH = process.env.FILE_PATH || './tmp';   // 运行目录,sub节点文件保存目录
-const SUB_PATH = process.env.SUB_PATH || 'sub';       // 订阅路径
-const PORT = process.env.SERVER_PORT || process.env.PORT || 3000;        // http服务订阅端口
-const UUID = process.env.UUID || '9afd1229-b893-40c1-84dd-51e7ce204913'; // 使用哪吒v1,在不同的平台运行需修改UUID,否则会覆盖
-const NEZHA_SERVER = process.env.NEZHA_SERVER || '';        // 哪吒v1填写形式: nz.abc.com:8008  哪吒v0填写形式：nz.abc.com
-const NEZHA_PORT = process.env.NEZHA_PORT || '';            // 使用哪吒v1请留空，哪吒v0需填写
-const NEZHA_KEY = process.env.NEZHA_KEY || '';              // 哪吒v1的NZ_CLIENT_SECRET或哪吒v0的agent密钥
-const ARGO_DOMAIN = process.env.ARGO_DOMAIN || '';          // 固定隧道域名,留空即启用临时隧道
-const ARGO_AUTH = process.env.ARGO_AUTH || '';              // 固定隧道密钥json或token,留空即启用临时隧道,json获取地址：https://json.zone.id
-const ARGO_PORT = process.env.ARGO_PORT || 8001;            // 固定隧道端口,使用token需在cloudflare后台设置和这里一致
-const CFIP = process.env.CFIP || 'cdns.doon.eu.org';        // 节点优选域名或优选ip  
-const CFPORT = process.env.CFPORT || 443;                   // 节点优选域名或优选ip对应的端口
-const NAME = process.env.NAME || '';                        // 节点名称
+/**
+ * ==========================================
+ * CYBER-BOT MATRIX - 赛博假人矩阵控制系统
+ * 版本: 2.2 (Pterodactyl & Visual Optimized)
+ * 功能: 自动适配面板端口 / UI深度美化 / 输入框修复
+ * ==========================================
+ */
+const { execSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 
-// 创建运行文件夹
-if (!fs.existsSync(FILE_PATH)) {
-  fs.mkdirSync(FILE_PATH);
-  console.log(`${FILE_PATH} is created`);
-} else {
-  console.log(`${FILE_PATH} already exists`);
-}
+// 1. 自动依赖管理 (首次运行会慢一点)
+const REQUIRED_DEPS = ['mineflayer', 'minecraft-protocol', 'minecraft-data', 'express'];
+const DEFAULT_PASSWORD = "Pwd123456"; 
 
-// 生成随机6位字符文件名
-function generateRandomName() {
-  const characters = 'abcdefghijklmnopqrstuvwxyz';
-  let result = '';
-  for (let i = 0; i < 6; i++) {
-    result += characters.charAt(Math.floor(Math.random() * characters.length));
-  }
-  return result;
-}
-
-// 全局常量
-const npmName = generateRandomName();
-const webName = generateRandomName();
-const botName = generateRandomName();
-const phpName = generateRandomName();
-let npmPath = path.join(FILE_PATH, npmName);
-let phpPath = path.join(FILE_PATH, phpName);
-let webPath = path.join(FILE_PATH, webName);
-let botPath = path.join(FILE_PATH, botName);
-let subPath = path.join(FILE_PATH, 'sub.txt');
-let listPath = path.join(FILE_PATH, 'list.txt');
-let bootLogPath = path.join(FILE_PATH, 'boot.log');
-let configPath = path.join(FILE_PATH, 'config.json');
-
-// 如果订阅器上存在历史运行节点则先删除
-function deleteNodes() {
-  try {
-    if (!UPLOAD_URL) return;
-    if (!fs.existsSync(subPath)) return;
-
-    let fileContent;
-    try {
-      fileContent = fs.readFileSync(subPath, 'utf-8');
-    } catch {
-      return null;
+function setupEnvironment() {
+    let missing = false;
+    for (const dep of REQUIRED_DEPS) {
+        try { require.resolve(dep); } catch (e) { missing = true; }
     }
-
-    const decoded = Buffer.from(fileContent, 'base64').toString('utf-8');
-    const nodes = decoded.split('\n').filter(line => 
-      /(vless|vmess|trojan|hysteria2|tuic):\/\//.test(line)
-    );
-
-    if (nodes.length === 0) return;
-
-    axios.post(`${UPLOAD_URL}/api/delete-nodes`, 
-      JSON.stringify({ nodes }),
-      { headers: { 'Content-Type': 'application/json' } }
-    ).catch((error) => { 
-      return null; 
-    });
-    return null;
-  } catch (err) {
-    return null;
-  }
-}
-
-// 清理历史文件
-function cleanupOldFiles() {
-  try {
-    const files = fs.readdirSync(FILE_PATH);
-    files.forEach(file => {
-      const filePath = path.join(FILE_PATH, file);
-      try {
-        const stat = fs.statSync(filePath);
-        if (stat.isFile()) {
-          fs.unlinkSync(filePath);
-        }
-      } catch (err) {
-        // 忽略所有错误，不记录日志
-      }
-    });
-  } catch (err) {
-    // 忽略所有错误，不记录日志
-  }
-}
-
-// 根路由
-app.get("/", function(req, res) {
-  res.send("Hello world!");
-});
-
-// 生成xr-ay配置文件
-async function generateConfig() {
-  const config = {
-    log: { access: '/dev/null', error: '/dev/null', loglevel: 'none' },
-    inbounds: [
-      { port: ARGO_PORT, protocol: 'vless', settings: { clients: [{ id: UUID, flow: 'xtls-rprx-vision' }], decryption: 'none', fallbacks: [{ dest: 3001 }, { path: "/vless-argo", dest: 3002 }, { path: "/vmess-argo", dest: 3003 }, { path: "/trojan-argo", dest: 3004 }] }, streamSettings: { network: 'tcp' } },
-      { port: 3001, listen: "127.0.0.1", protocol: "vless", settings: { clients: [{ id: UUID }], decryption: "none" }, streamSettings: { network: "tcp", security: "none" } },
-      { port: 3002, listen: "127.0.0.1", protocol: "vless", settings: { clients: [{ id: UUID, level: 0 }], decryption: "none" }, streamSettings: { network: "ws", security: "none", wsSettings: { path: "/vless-argo" } }, sniffing: { enabled: true, destOverride: ["http", "tls", "quic"], metadataOnly: false } },
-      { port: 3003, listen: "127.0.0.1", protocol: "vmess", settings: { clients: [{ id: UUID, alterId: 0 }] }, streamSettings: { network: "ws", wsSettings: { path: "/vmess-argo" } }, sniffing: { enabled: true, destOverride: ["http", "tls", "quic"], metadataOnly: false } },
-      { port: 3004, listen: "127.0.0.1", protocol: "trojan", settings: { clients: [{ password: UUID }] }, streamSettings: { network: "ws", security: "none", wsSettings: { path: "/trojan-argo" } }, sniffing: { enabled: true, destOverride: ["http", "tls", "quic"], metadataOnly: false } },
-    ],
-    dns: { servers: ["https+local://8.8.8.8/dns-query"] },
-    outbounds: [ { protocol: "freedom", tag: "direct" }, {protocol: "blackhole", tag: "block"} ]
-  };
-  fs.writeFileSync(path.join(FILE_PATH, 'config.json'), JSON.stringify(config, null, 2));
-}
-
-// 判断系统架构
-function getSystemArchitecture() {
-  const arch = os.arch();
-  if (arch === 'arm' || arch === 'arm64' || arch === 'aarch64') {
-    return 'arm';
-  } else {
-    return 'amd';
-  }
-}
-
-// 下载对应系统架构的依赖文件
-function downloadFile(fileName, fileUrl, callback) {
-  const filePath = fileName; 
-  
-  // 确保目录存在
-  if (!fs.existsSync(FILE_PATH)) {
-    fs.mkdirSync(FILE_PATH, { recursive: true });
-  }
-  
-  const writer = fs.createWriteStream(filePath);
-
-  axios({
-    method: 'get',
-    url: fileUrl,
-    responseType: 'stream',
-  })
-    .then(response => {
-      response.data.pipe(writer);
-
-      writer.on('finish', () => {
-        writer.close();
-        console.log(`Download ${path.basename(filePath)} successfully`);
-        callback(null, filePath);
-      });
-
-      writer.on('error', err => {
-        fs.unlink(filePath, () => { });
-        const errorMessage = `Download ${path.basename(filePath)} failed: ${err.message}`;
-        console.error(errorMessage); // 下载失败时输出错误消息
-        callback(errorMessage);
-      });
-    })
-    .catch(err => {
-      const errorMessage = `Download ${path.basename(filePath)} failed: ${err.message}`;
-      console.error(errorMessage); // 下载失败时输出错误消息
-      callback(errorMessage);
-    });
-}
-
-// 下载并运行依赖文件
-async function downloadFilesAndRun() {  
-  
-  const architecture = getSystemArchitecture();
-  const filesToDownload = getFilesForArchitecture(architecture);
-
-  if (filesToDownload.length === 0) {
-    console.log(`Can't find a file for the current architecture`);
-    return;
-  }
-
-  const downloadPromises = filesToDownload.map(fileInfo => {
-    return new Promise((resolve, reject) => {
-      downloadFile(fileInfo.fileName, fileInfo.fileUrl, (err, filePath) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(filePath);
-        }
-      });
-    });
-  });
-
-  try {
-    await Promise.all(downloadPromises);
-  } catch (err) {
-    console.error('Error downloading files:', err);
-    return;
-  }
-  // 授权和运行
-  function authorizeFiles(filePaths) {
-    const newPermissions = 0o775;
-    filePaths.forEach(absoluteFilePath => {
-      if (fs.existsSync(absoluteFilePath)) {
-        fs.chmod(absoluteFilePath, newPermissions, (err) => {
-          if (err) {
-            console.error(`Empowerment failed for ${absoluteFilePath}: ${err}`);
-          } else {
-            console.log(`Empowerment success for ${absoluteFilePath}: ${newPermissions.toString(8)}`);
-          }
-        });
-      }
-    });
-  }
-  const filesToAuthorize = NEZHA_PORT ? [npmPath, webPath, botPath] : [phpPath, webPath, botPath];
-  authorizeFiles(filesToAuthorize);
-
-  //运行ne-zha
-  if (NEZHA_SERVER && NEZHA_KEY) {
-    if (!NEZHA_PORT) {
-      // 检测哪吒是否开启TLS
-      const port = NEZHA_SERVER.includes(':') ? NEZHA_SERVER.split(':').pop() : '';
-      const tlsPorts = new Set(['443', '8443', '2096', '2087', '2083', '2053']);
-      const nezhatls = tlsPorts.has(port) ? 'true' : 'false';
-      // 生成 config.yaml
-      const configYaml = `
-client_secret: ${NEZHA_KEY}
-debug: false
-disable_auto_update: true
-disable_command_execute: false
-disable_force_update: true
-disable_nat: false
-disable_send_query: false
-gpu: false
-insecure_tls: true
-ip_report_period: 1800
-report_delay: 4
-server: ${NEZHA_SERVER}
-skip_connection_count: true
-skip_procs_count: true
-temperature: false
-tls: ${nezhatls}
-use_gitee_to_upgrade: false
-use_ipv6_country_code: false
-uuid: ${UUID}`;
-      
-      fs.writeFileSync(path.join(FILE_PATH, 'config.yaml'), configYaml);
-      
-      // 运行 v1
-      const command = `nohup ${phpPath} -c "${FILE_PATH}/config.yaml" >/dev/null 2>&1 &`;
-      try {
-        await exec(command);
-        console.log(`${phpName} is running`);
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-      } catch (error) {
-        console.error(`php running error: ${error}`);
-      }
-    } else {
-      let NEZHA_TLS = '';
-      const tlsPorts = ['443', '8443', '2096', '2087', '2083', '2053'];
-      if (tlsPorts.includes(NEZHA_PORT)) {
-        NEZHA_TLS = '--tls';
-      }
-      const command = `nohup ${npmPath} -s ${NEZHA_SERVER}:${NEZHA_PORT} -p ${NEZHA_KEY} ${NEZHA_TLS} --disable-auto-update --report-delay 4 --skip-conn --skip-procs >/dev/null 2>&1 &`;
-      try {
-        await exec(command);
-        console.log(`${npmName} is running`);
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-      } catch (error) {
-        console.error(`npm running error: ${error}`);
-      }
-    }
-  } else {
-    console.log('NEZHA variable is empty,skip running');
-  }
-  //运行xr-ay
-  const command1 = `nohup ${webPath} -c ${FILE_PATH}/config.json >/dev/null 2>&1 &`;
-  try {
-    await exec(command1);
-    console.log(`${webName} is running`);
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  } catch (error) {
-    console.error(`web running error: ${error}`);
-  }
-
-  // 运行cloud-fared
-  if (fs.existsSync(botPath)) {
-    let args;
-
-    if (ARGO_AUTH.match(/^[A-Z0-9a-z=]{120,250}$/)) {
-      args = `tunnel --edge-ip-version auto --no-autoupdate --protocol http2 run --token ${ARGO_AUTH}`;
-    } else if (ARGO_AUTH.match(/TunnelSecret/)) {
-      args = `tunnel --edge-ip-version auto --config ${FILE_PATH}/tunnel.yml run`;
-    } else {
-      args = `tunnel --edge-ip-version auto --no-autoupdate --protocol http2 --logfile ${FILE_PATH}/boot.log --loglevel info --url http://localhost:${ARGO_PORT}`;
-    }
-
-    try {
-      await exec(`nohup ${botPath} ${args} >/dev/null 2>&1 &`);
-      console.log(`${botName} is running`);
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-    } catch (error) {
-      console.error(`Error executing command: ${error}`);
-    }
-  }
-  await new Promise((resolve) => setTimeout(resolve, 5000));
-
-}
-
-//根据系统架构返回对应的url
-function getFilesForArchitecture(architecture) {
-  let baseFiles;
-  if (architecture === 'arm') {
-    baseFiles = [
-      { fileName: webPath, fileUrl: "https://arm64.ssss.nyc.mn/web" },
-      { fileName: botPath, fileUrl: "https://arm64.ssss.nyc.mn/bot" }
-    ];
-  } else {
-    baseFiles = [
-      { fileName: webPath, fileUrl: "https://amd64.ssss.nyc.mn/web" },
-      { fileName: botPath, fileUrl: "https://amd64.ssss.nyc.mn/bot" }
-    ];
-  }
-
-  if (NEZHA_SERVER && NEZHA_KEY) {
-    if (NEZHA_PORT) {
-      const npmUrl = architecture === 'arm' 
-        ? "https://arm64.ssss.nyc.mn/agent"
-        : "https://amd64.ssss.nyc.mn/agent";
-        baseFiles.unshift({ 
-          fileName: npmPath, 
-          fileUrl: npmUrl 
-        });
-    } else {
-      const phpUrl = architecture === 'arm' 
-        ? "https://arm64.ssss.nyc.mn/v1" 
-        : "https://amd64.ssss.nyc.mn/v1";
-      baseFiles.unshift({ 
-        fileName: phpPath, 
-        fileUrl: phpUrl
-      });
-    }
-  }
-
-  return baseFiles;
-}
-
-// 获取固定隧道json
-function argoType() {
-  if (!ARGO_AUTH || !ARGO_DOMAIN) {
-    console.log("ARGO_DOMAIN or ARGO_AUTH variable is empty, use quick tunnels");
-    return;
-  }
-
-  if (ARGO_AUTH.includes('TunnelSecret')) {
-    fs.writeFileSync(path.join(FILE_PATH, 'tunnel.json'), ARGO_AUTH);
-    const tunnelYaml = `
-  tunnel: ${ARGO_AUTH.split('"')[11]}
-  credentials-file: ${path.join(FILE_PATH, 'tunnel.json')}
-  protocol: http2
-  
-  ingress:
-    - hostname: ${ARGO_DOMAIN}
-      service: http://localhost:${ARGO_PORT}
-      originRequest:
-        noTLSVerify: true
-    - service: http_status:404
-  `;
-    fs.writeFileSync(path.join(FILE_PATH, 'tunnel.yml'), tunnelYaml);
-  } else {
-    console.log("ARGO_AUTH mismatch TunnelSecret,use token connect to tunnel");
-  }
-}
-
-// 获取临时隧道domain
-async function extractDomains() {
-  let argoDomain;
-
-  if (ARGO_AUTH && ARGO_DOMAIN) {
-    argoDomain = ARGO_DOMAIN;
-    console.log('ARGO_DOMAIN:', argoDomain);
-    await generateLinks(argoDomain);
-  } else {
-    try {
-      const fileContent = fs.readFileSync(path.join(FILE_PATH, 'boot.log'), 'utf-8');
-      const lines = fileContent.split('\n');
-      const argoDomains = [];
-      lines.forEach((line) => {
-        const domainMatch = line.match(/https?:\/\/([^ ]*trycloudflare\.com)\/?/);
-        if (domainMatch) {
-          const domain = domainMatch[1];
-          argoDomains.push(domain);
-        }
-      });
-
-      if (argoDomains.length > 0) {
-        argoDomain = argoDomains[0];
-        console.log('ArgoDomain:', argoDomain);
-        await generateLinks(argoDomain);
-      } else {
-        console.log('ArgoDomain not found, re-running bot to obtain ArgoDomain');
-        // 删除 boot.log 文件，等待 2s 重新运行 server 以获取 ArgoDomain
-        fs.unlinkSync(path.join(FILE_PATH, 'boot.log'));
-        async function killBotProcess() {
-          try {
-            if (process.platform === 'win32') {
-              await exec(`taskkill /f /im ${botName}.exe > nul 2>&1`);
-            } else {
-              await exec(`pkill -f "[${botName.charAt(0)}]${botName.substring(1)}" > /dev/null 2>&1`);
-            }
-          } catch (error) {
-            // 忽略输出
-          }
-        }
-        killBotProcess();
-        await new Promise((resolve) => setTimeout(resolve, 3000));
-        const args = `tunnel --edge-ip-version auto --no-autoupdate --protocol http2 --logfile ${FILE_PATH}/boot.log --loglevel info --url http://localhost:${ARGO_PORT}`;
+    if (missing) {
+        console.log("\x1b[36m[System]\x1b[0m 检测到缺失依赖，正在安装赛博核心组件...");
         try {
-          await exec(`nohup ${botPath} ${args} >/dev/null 2>&1 &`);
-          console.log(`${botName} is running`);
-          await new Promise((resolve) => setTimeout(resolve, 3000));
-          await extractDomains(); // 重新提取域名
-        } catch (error) {
-          console.error(`Error executing command: ${error}`);
+            execSync(`npm install ${REQUIRED_DEPS.map(d => d + '@latest').join(' ')} --no-audit --no-fund`, { stdio: 'inherit' });
+        } catch(e) {
+            console.error("依赖安装失败，请检查网络权限。");
         }
-      }
-    } catch (error) {
-      console.error('Error reading boot.log:', error);
-  }
-}
-
-// 获取isp信息
-async function getMetaInfo() {
-  try {
-    const response1 = await axios.get('https://ipapi.co/json/', { timeout: 3000 });
-    if (response1.data && response1.data.country_code && response1.data.org) {
-      return `${response1.data.country_code}_${response1.data.org}`;
     }
-  } catch (error) {
-      try {
-        // 备用 ip-api.com 获取isp
-        const response2 = await axios.get('http://ip-api.com/json/', { timeout: 3000 });
-        if (response2.data && response2.data.status === 'success' && response2.data.countryCode && response2.data.org) {
-          return `${response2.data.countryCode}_${response2.data.org}`;
-        }
-      } catch (error) {
-        // console.error('Backup API also failed');
-      }
-  }
-  return 'Unknown';
 }
-// 生成 list 和 sub 信息
-async function generateLinks(argoDomain) {
-  const ISP = await getMetaInfo();
-  const nodeName = NAME ? `${NAME}-${ISP}` : ISP;
-  return new Promise((resolve) => {
-    setTimeout(() => {
-      const VMESS = { v: '2', ps: `${nodeName}`, add: CFIP, port: CFPORT, id: UUID, aid: '0', scy: 'none', net: 'ws', type: 'none', host: argoDomain, path: '/vmess-argo?ed=2560', tls: 'tls', sni: argoDomain, alpn: '', fp: 'firefox'};
-      const subTxt = `
-vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${argoDomain}&fp=firefox&type=ws&host=${argoDomain}&path=%2Fvless-argo%3Fed%3D2560#${nodeName}
+setupEnvironment();
 
-vmess://${Buffer.from(JSON.stringify(VMESS)).toString('base64')}
+const mineflayer = require("mineflayer");
+const protocol = require("minecraft-protocol");
+const mcDataLoader = require("minecraft-data");
+const express = require("express");
 
-trojan://${UUID}@${CFIP}:${CFPORT}?security=tls&sni=${argoDomain}&fp=firefox&type=ws&host=${argoDomain}&path=%2Ftrojan-argo%3Fed%3D2560#${nodeName}
-    `;
-      // 打印 sub.txt 内容到控制台
-      console.log(Buffer.from(subTxt).toString('base64'));
-      fs.writeFileSync(subPath, Buffer.from(subTxt).toString('base64'));
-      console.log(`${FILE_PATH}/sub.txt saved successfully`);
-      uploadNodes();
-      // 将内容进行 base64 编码并写入 SUB_PATH 路由
-      app.get(`/${SUB_PATH}`, (req, res) => {
-        const encodedContent = Buffer.from(subTxt).toString('base64');
-        res.set('Content-Type', 'text/plain; charset=utf-8');
-        res.send(encodedContent);
-      });
-      resolve(subTxt);
-      }, 2000);
+const app = express();
+const activeBots = new Map(); 
+const CONFIG_FILE = path.join(__dirname, 'bots_config.json');
+
+app.use(express.json());
+
+// 保存配置
+function saveBotsConfig() {
+    const config = [];
+    activeBots.forEach((bot) => {
+        config.push({ host: bot.targetHost, port: bot.targetPort, username: bot.username });
     });
-  }
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
 }
 
-// 自动上传节点或订阅
-async function uploadNodes() {
-  if (UPLOAD_URL && PROJECT_URL) {
-    const subscriptionUrl = `${PROJECT_URL}/${SUB_PATH}`;
-    const jsonData = {
-      subscription: [subscriptionUrl]
-    };
+// 自动检测服务器版本
+async function detectServerVersion(host, port) {
     try {
-        const response = await axios.post(`${UPLOAD_URL}/api/add-subscriptions`, jsonData, {
-            headers: {
-                'Content-Type': 'application/json'
-            }
-        });
-        
-        if (response && response.status === 200) {
-            console.log('Subscription uploaded successfully');
-            return response;
-        } else {
-          return null;
-          //  console.log('Unknown response status');
-        }
-    } catch (error) {
-        if (error.response) {
-            if (error.response.status === 400) {
-              //  console.error('Subscription already exists');
-            }
-        }
-    }
-  } else if (UPLOAD_URL) {
-      if (!fs.existsSync(listPath)) return;
-      const content = fs.readFileSync(listPath, 'utf-8');
-      const nodes = content.split('\n').filter(line => /(vless|vmess|trojan|hysteria2|tuic):\/\//.test(line));
-
-      if (nodes.length === 0) return;
-
-      const jsonData = JSON.stringify({ nodes });
-
-      try {
-          const response = await axios.post(`${UPLOAD_URL}/api/add-nodes`, jsonData, {
-              headers: { 'Content-Type': 'application/json' }
-          });
-          if (response && response.status === 200) {
-            console.log('Nodes uploaded successfully');
-            return response;
-        } else {
-            return null;
-        }
-      } catch (error) {
-          return null;
-      }
-  } else {
-      // console.log('Skipping upload nodes');
-      return;
-  }
+        const response = await protocol.ping({ host, port, timeout: 5000 });
+        const protocolId = response.version.protocol;
+        const pcData = mcDataLoader.versionsByMinecraftVersion.pc;
+        const matchedVersion = Object.keys(pcData).find(v => pcData[v].version === protocolId && !v.includes('w'));
+        return matchedVersion || response.version.name.match(/(\d+\.\d+(\.\d+)?)/)?.[0] || false;
+    } catch (e) { return false; }
 }
 
-// 90s后删除相关文件
-function cleanFiles() {
-  setTimeout(() => {
-    const filesToDelete = [bootLogPath, configPath, webPath, botPath];  
-    
-    if (NEZHA_PORT) {
-      filesToDelete.push(npmPath);
-    } else if (NEZHA_SERVER && NEZHA_KEY) {
-      filesToDelete.push(phpPath);
-    }
-
-    // Windows系统使用不同的删除命令
-    if (process.platform === 'win32') {
-      exec(`del /f /q ${filesToDelete.join(' ')} > nul 2>&1`, (error) => {
-        console.clear();
-        console.log('App is running');
-        console.log('Thank you for using this script, enjoy!');
-      });
-    } else {
-      exec(`rm -rf ${filesToDelete.join(' ')} >/dev/null 2>&1`, (error) => {
-        console.clear();
-        console.log('App is running');
-        console.log('Thank you for using this script, enjoy!');
-      });
-    }
-  }, 90000); // 90s
-}
-cleanFiles();
-
-// 自动访问项目URL
-async function AddVisitTask() {
-  if (!AUTO_ACCESS || !PROJECT_URL) {
-    console.log("Skipping adding automatic access task");
-    return;
-  }
-
-  try {
-    const response = await axios.post('https://oooo.serv00.net/add-url', {
-      url: PROJECT_URL
-    }, {
-      headers: {
-        'Content-Type': 'application/json'
-      }
+// 性能优化引擎
+function applyExtremeOptimization(bot) {
+    bot.on('inject_allowed', () => {
+        if (bot.physics) bot.physics.enabled = false;
+        bot.entities = {};
+        if (bot.world) { bot.world.getColumn = () => null; bot.world.getColumns = () => []; }
     });
-    // console.log(`${JSON.stringify(response.data)}`);
-    console.log(`automatic access task added successfully`);
-    return response;
-  } catch (error) {
-    console.error(`Add automatic access task faild: ${error.message}`);
-    return null;
-  }
 }
 
-// 主运行逻辑
-async function startserver() {
-  try {
-    argoType();
-    deleteNodes();
-    cleanupOldFiles();
-    await generateConfig();
-    await downloadFilesAndRun();
-    await extractDomains();
-    await AddVisitTask();
-  } catch (error) {
-    console.error('Error in startserver:', error);
-  }
+// 反挂机行为逻辑
+function startSmartRoam(bot) {
+    const perform = () => {
+        if (bot.status !== "在线" || !bot.entity) return;
+        try {
+            bot.look(bot.entity.yaw + (Math.random()-0.5), (Math.random()-0.5)*0.2);
+            if (Math.random() > 0.8) bot.swingArm('right');
+        } catch (e) {}
+        bot.roamTimer = setTimeout(perform, 10000 + Math.random()*15000);
+    };
+    perform();
 }
-startserver().catch(error => {
-  console.error('Unhandled error in startserver:', error);
+
+// 创建机器人实例
+async function createBotInstance(id, host, port, username, existingLogs = []) {
+    if (activeBots.get(id)?.status === "在线") return;
+
+    const botVersion = await detectServerVersion(host, port);
+    const bot = mineflayer.createBot({
+        host, port, username, version: botVersion || undefined,
+        auth: 'offline', hideErrors: true, viewDistance: "tiny",
+        checkTimeoutInterval: 60000
+    });
+
+    bot.logs = existingLogs;
+    bot.status = "初始化...";
+    bot.targetHost = host;
+    bot.targetPort = port;
+    bot.pushLog = (msg) => {
+        const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+        bot.logs.unshift(`[${time}] ${msg}`);
+        if (bot.logs.length > 8) bot.logs.pop();
+    };
+
+    applyExtremeOptimization(bot);
+
+    bot.once('spawn', () => {
+        bot.status = "在线";
+        bot.pushLog("✨ 链路已建立，核心就绪");
+        saveBotsConfig();
+        setTimeout(() => {
+            bot.chat(`/register ${DEFAULT_PASSWORD} ${DEFAULT_PASSWORD}`);
+            setTimeout(() => { bot.chat(`/login ${DEFAULT_PASSWORD}`); startSmartRoam(bot); }, 2000);
+        }, 3000);
+    });
+
+    bot.on('error', (err) => bot.pushLog(`💢 异常: ${err.message}`));
+    bot.once('end', () => {
+        if (activeBots.has(id)) {
+            bot.status = "重连中";
+            setTimeout(() => createBotInstance(id, host, port, username, bot.logs), 10000);
+        }
+    });
+    activeBots.set(id, bot);
+}
+
+// API 路由
+app.post("/api/bots", async (req, res) => {
+    const { host, port, username } = req.body;
+    const id = `bot_${Date.now()}_${Math.random().toString(36).substr(2,4)}`;
+    await createBotInstance(id, host, port, username);
+    res.json({ success: true });
 });
-app.listen(PORT, () => console.log(`http server is running on port:${PORT}!`));
+
+app.get("/api/bots", (req, res) => {
+    const list = [];
+    activeBots.forEach((b, id) => list.push({ id, username: b.username, host: b.targetHost, status: b.status, logs: b.logs }));
+    res.json(list);
+});
+
+app.delete("/api/bots/:id", (req, res) => {
+    const bot = activeBots.get(req.params.id);
+    if (bot) { activeBots.delete(req.params.id); bot.end(); setTimeout(saveBotsConfig, 500); }
+    res.json({ success: true });
+});
+
+// 控制面板 HTML
+app.get("/", (req, res) => {
+    res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>CYBER-BOT MATRIX</title>
+        <style>
+            :root {
+                --primary: #00f2ff;
+                --primary-glow: rgba(0, 242, 255, 0.4);
+                --danger: #ff0055;
+                --bg: #05060a;
+                --card-bg: rgba(15, 20, 30, 0.9);
+            }
+
+            body {
+                background: var(--bg);
+                background-image: linear-gradient(rgba(0, 242, 255, 0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(0, 242, 255, 0.03) 1px, transparent 1px);
+                background-size: 40px 40px;
+                color: #e0e0e0;
+                font-family: 'Segoe UI', sans-serif;
+                margin: 0; padding: 40px; min-height: 100vh;
+            }
+
+            .container { max-width: 1100px; margin: 0 auto; }
+
+            h2 {
+                text-transform: uppercase; letter-spacing: 6px; color: var(--primary);
+                text-shadow: 0 0 15px var(--primary-glow);
+                display: flex; align-items: center; gap: 15px; margin-bottom: 40px;
+            }
+
+            .live-indicator {
+                width: 12px; height: 12px; background: var(--primary); border-radius: 50%;
+                box-shadow: 0 0 10px var(--primary); animation: pulse 2s infinite;
+            }
+            @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+            .control-panel {
+                background: var(--card-bg);
+                backdrop-filter: blur(15px);
+                border: 1px solid rgba(0, 242, 255, 0.2);
+                padding: 30px; border-radius: 4px;
+                display: flex; gap: 15px; justify-content: center;
+                margin-bottom: 50px;
+                box-shadow: 0 10px 40px rgba(0,0,0,0.6);
+                clip-path: polygon(0 0, 98% 0, 100% 20%, 100% 100%, 2% 100%, 0 80%);
+            }
+
+            input {
+                background: rgba(0,0,0,0.5); border: 1px solid rgba(0, 242, 255, 0.3);
+                border-left: 3px solid var(--primary); color: var(--primary);
+                padding: 12px 15px; outline: none; font-family: monospace;
+            }
+            #addr-box { width: 320px; }
+            #user-box { width: 180px; }
+
+            button.deploy {
+                background: transparent; border: 2px solid var(--primary);
+                color: var(--primary); padding: 0 30px; cursor: pointer;
+                text-transform: uppercase; font-weight: bold; transition: 0.3s;
+            }
+            button.deploy:hover { background: var(--primary); color: #000; box-shadow: 0 0 25px var(--primary); }
+
+            .bot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 25px; }
+
+            .bot-card {
+                background: var(--card-bg); border-top: 4px solid var(--primary);
+                padding: 20px; transition: 0.3s; border-radius: 2px;
+            }
+            .bot-card:hover { transform: translateY(-5px); box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+
+            .bot-header { display: flex; justify-content: space-between; margin-bottom: 15px; }
+            .bot-name { font-weight: bold; color: #fff; font-size: 1.1em; }
+            .bot-status { font-size: 0.75em; border: 1px solid currentColor; padding: 2px 8px; }
+
+            .bot-logs {
+                background: #000; height: 140px; padding: 10px;
+                font-family: 'Consolas', monospace; font-size: 0.75em;
+                color: #00ff9d; overflow: hidden; border: 1px solid rgba(255,255,255,0.05);
+                position: relative;
+            }
+            .bot-logs::before {
+                content: ""; position: absolute; top:0; left:0; width:100%; height:100%;
+                background: linear-gradient(transparent 50%, rgba(0,0,0,0.1) 50%);
+                background-size: 100% 2px; pointer-events: none;
+            }
+
+            .btn-remove {
+                width: 100%; margin-top: 15px; background: transparent;
+                border: 1px solid var(--danger); color: var(--danger);
+                padding: 10px; cursor: pointer; text-transform: uppercase; font-size: 0.8em;
+            }
+            .btn-remove:hover { background: var(--danger); color: #fff; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h2><div class="live-indicator"></div> CYBER-BOT MATRIX 控制矩阵</h2>
+            <div class="control-panel">
+                <input id="addr-box" placeholder="地址:端口 (例如 play.mc.com)">
+                <input id="user-box" placeholder="假人用户名">
+                <button class="deploy" onclick="addBot()">初始化注入</button>
+            </div>
+            <div id="grid" class="bot-grid"></div>
+        </div>
+        <script>
+            async function addBot() {
+                const addr = document.getElementById('addr-box').value.trim();
+                const user = document.getElementById('user-box').value.trim();
+                if(!addr || !user) return;
+                let host = addr; let port = 25565;
+                if(addr.includes(':')) {
+                    const parts = addr.split(':');
+                    host = parts[0]; port = parseInt(parts[1]) || 25565;
+                }
+                await fetch('/api/bots', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({host, port, username: user})
+                });
+                document.getElementById('user-box').value = "";
+            }
+            async function removeBot(id) { await fetch('/api/bots/' + id, { method: 'DELETE' }); }
+            function updateUI() {
+                fetch('/api/bots').then(res => res.json()).then(bots => {
+                    const grid = document.getElementById('grid');
+                    grid.innerHTML = bots.map(b => \`
+                        <div class="bot-card">
+                            <div class="bot-header">
+                                <div>
+                                    <div class="bot-name">\${b.username}</div>
+                                    <div style="font-size:0.7em; color:#666; margin-top:4px;">\${b.host}</div>
+                                </div>
+                                <div class="bot-status" style="color: \${b.status==='在线'?'#00f2ff':'#ff0055'}">\${b.status}</div>
+                            </div>
+                            <div class="bot-logs">
+                                \${b.logs.map(l => \`<div style="margin-bottom:2px; opacity:0.8;">\${l}</div>\`).join('')}
+                            </div>
+                            <button class="btn-remove" onclick="removeBot('\${b.id}')">终止进程</button>
+                        </div>
+                    \`).join('');
+                }).catch(() => {});
+            }
+            setInterval(updateUI, 2000); updateUI();
+        </script>
+    </body>
+    </html>
+    `);
+});
+
+/**
+ * ==========================================
+ * 启动逻辑：自动适配翼龙面板端口
+ * ==========================================
+ */
+const PORT = process.env.SERVER_PORT || 4681; // 优先读取翼龙分配的端口
+const HOST = '0.0.0.0'; // 必须使用 0.0.0.0 才能在 Docker 环境被外部访问
+
+app.listen(PORT, HOST, async () => {
+    console.log(`\x1b[36m
+    ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+    ┃          CYBER-BOT MATRIX 系统已上线             ┃
+    ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+    ┃  运行环境: 翼龙面板 (Pterodactyl)                ┃
+    ┃  监听端口: ${PORT.toString().padEnd(38)} ┃
+    ┃  访问地址: 请通过面板分配的 IP:${PORT} 访问      ┃
+    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\x1b[0m`);
+    
+    // 恢复之前的配置
+    if (fs.existsSync(CONFIG_FILE)) {
+        try {
+            const saved = JSON.parse(fs.readFileSync(CONFIG_FILE));
+            for (const b of saved) {
+                const id = `bot_${Date.now()}_${Math.random().toString(36).substr(2,4)}`;
+                createBotInstance(id, b.host, b.port, b.username);
+                await new Promise(r => setTimeout(r, 1000));
+            }
+        } catch (e) {}
+    }
+});
