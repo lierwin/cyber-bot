@@ -13,21 +13,7 @@ const path = require('path');
 const REQUIRED_DEPS = ['mineflayer', 'minecraft-protocol', 'minecraft-data', 'express'];
 const DEFAULT_PASSWORD = "Pwd123456"; 
 
-function setupEnvironment() {
-    let missing = false;
-    for (const dep of REQUIRED_DEPS) {
-        try { require.resolve(dep); } catch (e) { missing = true; }
-    }
-    if (missing) {
-        console.log("\x1b[36m[System]\x1b[0m 检测到缺失依赖，正在安装赛博核心组件...");
-        try {
-            execSync(`npm install ${REQUIRED_DEPS.map(d => d + '@latest').join(' ')} --no-audit --no-fund`, { stdio: 'inherit' });
-        } catch(e) {
-            console.error("依赖安装失败，请检查网络权限。");
-        }
-    }
-}
-setupEnvironment();
+
 
 const mineflayer = require("mineflayer");
 const protocol = require("minecraft-protocol");
@@ -36,7 +22,7 @@ const express = require("express");
 
 const app = express();
 const activeBots = new Map(); 
-const CONFIG_FILE = path.join(__dirname, 'bots_config.json');
+const CONFIG_FILE = '/tmp/bots_config.json';
 
 app.use(express.json());
 
@@ -303,7 +289,7 @@ app.get("/", (req, res) => {
  * 启动逻辑：自动适配翼龙面板端口
  * ==========================================
  */
-const PORT = process.env.SERVER_PORT || 4681; // 优先读取翼龙分配的端口
+const PORT = process.env.PORT || 3000; // 优先读取翼龙分配的端口
 const HOST = '0.0.0.0'; // 必须使用 0.0.0.0 才能在 Docker 环境被外部访问
 
 app.listen(PORT, HOST, async () => {
